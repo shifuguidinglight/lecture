@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Lecture Translator</title>
+<style>
+:root{
+  --bg:#f6f5f2; --fg:#15171a; --mute:#6b7076; --bar:#ffffff; --line:#dcdad4;
+  --accent:#1f5eff; --accent-fg:#ffffff; --stop:#d92d20; --warn:#b54708;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f1114; --fg:#eef0f2; --mute:#8d949b; --bar:#171a1e; --line:#2a2e34;
+    --accent:#6b96ff; --accent-fg:#0b1020; --stop:#f0645a; --warn:#f5a25d;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+  display:flex; flex-direction:column; height:100dvh;
+}
+header,footer{background:var(--bar); padding:10px 16px; flex:none}
+header{padding-top:calc(10px + env(safe-area-inset-top,0px)); border-bottom:1px solid var(--line)}
+footer{padding-bottom:calc(12px + env(safe-area-inset-bottom,0px)); border-top:1px solid var(--line)}
+.langs{display:flex; align-items:center; gap:8px}
+select,button{font:inherit; color:inherit}
+select{
+  flex:1; min-width:0; padding:10px 8px; border-radius:10px; border:1px solid var(--line);
+  background:var(--bg); appearance:none; -webkit-appearance:none; text-align:center;
+}
+select:disabled{opacity:.5}
+.icon{
+  flex:none; width:40px; height:40px; border-radius:10px; border:1px solid var(--line);
+  background:var(--bg); display:grid; place-items:center; cursor:pointer;
+}
+.icon:disabled{opacity:.5}
+.tools{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap}
+.tools button{
+  padding:6px 12px; border-radius:999px; border:1px solid var(--line);
+  background:var(--bg); font-size:14px; cursor:pointer;
+}
+.tools button[aria-pressed="true"]{border-color:var(--accent); color:var(--accent)}
+main{flex:1; min-height:0; overflow-y:auto; padding:16px; -webkit-overflow-scrolling:touch}
+.hint{color:var(--mute); font-size:15px; max-width:34em}
+.line{margin:0 0 22px; max-width:40em}
+.line .t{font-weight:600; line-height:1.3; overflow-wrap:anywhere}
+.line .s{color:var(--mute); margin-top:4px; overflow-wrap:anywhere}
+.line.live{opacity:.65}
+body.nosrc .s{display:none}
+#msg{font-size:14px; color:var(--warn); margin:0 0 8px}
+#msg:empty{display:none}
+#go{
+  width:100%; padding:15px; border-radius:14px; border:0; font-weight:600; font-size:18px;
+  background:var(--accent); color:var(--accent-fg); cursor:pointer;
+}
+#go.on{background:var(--stop); color:#fff}
+#status{font-size:13px; color:var(--mute); margin-top:8px; text-align:center}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <div class="langs">
+    <select id="src" aria-label="Lecture language"></select>
+    <button class="icon" id="swap" aria-label="Swap languages">&#8644;</button>
+    <select id="tgt" aria-label="Translate to"></select>
+  </div>
+  <div class="tools">
+    <button id="smaller" aria-label="Smaller text">A&minus;</button>
+    <button id="bigger" aria-label="Larger text">A+</button>
+    <button id="tsrc" aria-pressed="true">Original</button>
+    <button id="copy">Copy</button>
+    <button id="clear">Clear</button>
+  </div>
+</header>
+<main id="feed">
+  <p class="hint" id="hint">Choose the lecture language and the language you want, tap Start, and hold the phone near the speaker. Use Safari and allow the microphone.</p>
+</main>
+<footer>
+  <p id="msg"></p>
+  <button id="go">Start</button>
+  <div id="status">Ready</div>
+</footer>
+
+<script>
+const LANGS = [
+  {n:'English',    s:'en-US', t:'en'},
+  {n:'Italiano',   s:'it-IT', t:'it'},
+  {n:'Español',    s:'es-ES', t:'es'},
+  {n:'Français',   s:'fr-FR', t:'fr'},
+  {n:'Deutsch',    s:'de-DE', t:'de'},
+  {n:'Português',  s:'pt-BR', t:'pt'},
+  {n:'Nederlands', s:'nl-NL', t:'nl'},
+  {n:'Polski',     s:'pl-PL', t:'pl'},
+  {n:'Türkçe',     s:'tr-TR', t:'tr'},
+  {n:'Русский',    s:'ru-RU', t:'ru'},
+  {n:'中文',        s:'zh-CN', t:'zh-CN'},
+  {n:'日本語',      s:'ja-JP', t:'ja'},
+  {n:'한국어',      s:'ko-KR', t:'ko'},
+  {n:'العربية',    s:'ar-SA', t:'ar'},
+  {n:'हिन्दी',     s:'hi-IN', t:'hi'}
+];
+const $ = id => document.getElementById(id);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+// ---- preferences (fail quietly if storage is blocked)
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v === null ? d : v; } catch(e){ return d; } },
+  set(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
+};
+let size = parseInt(store.get('size', '24'), 10) || 24;
+let showSrc = store.get('showSrc', '1') === '1';
+
+for (const sel of [$('src'), $('tgt')]) {
+  LANGS.forEach((l, i) => sel.add(new Option(l.n, i)));
+}
+$('src').value = store.get('src', '1');   // Italiano
+$('tgt').value = store.get('tgt', '0');   // English
+const src = () => LANGS[+$('src').value];
+const tgt = () => LANGS[+$('tgt').value];
+
+function applyLook(){
+  document.documentElement.style.setProperty('--fs', size + 'px');
+  $('feed').style.fontSize = size + 'px';
+  document.body.classList.toggle('nosrc', !showSrc);
+  $('tsrc').setAttribute('aria-pressed', showSrc ? 'true' : 'false');
+}
+applyLook();
+
+// ---- state
+let running = false, rec = null, sess = null, wake = null, restartTimer = null;
+const lines = [];        // {source, tr, el, tEl, sEl, fails}
+let partialEl = null, partialText = '', partialSeq = 0;
+
+function msg(t){ $('msg').textContent = t || ''; }
+function status(t){ $('status').textContent = t; }
+
+// ---- rendering
+function makeEl(live){
+  const el = document.createElement('div');
+  el.className = 'line' + (live ? ' live' : '');
+  const t = document.createElement('div'); t.className = 't'; t.style.fontSize = size + 'px';
+  const s = document.createElement('div'); s.className = 's'; s.style.fontSize = Math.max(14, size * 0.62) + 'px';
+  el.append(t, s);
+  return {el, tEl: t, sEl: s};
+}
+function scrollEnd(){
+  const f = $('feed');
+  f.scrollTop = f.scrollHeight;
+}
+function addLine(text){
+  $('hint').hidden = true;
+  const parts = makeEl(false);
+  const line = {source: text, tr: '', fails: 0, ...parts};
+  parts.tEl.textContent = '…';
+  parts.sEl.textContent = text;
+  if (partialEl) $('feed').insertBefore(parts.el, partialEl.el); else $('feed').append(parts.el);
+  lines.push(line);
+  enqueue({line, text});
+  scrollEnd();
+}
+function setPartial(text){
+  if (text === partialText) return;
+  partialText = text;
+  if (!text) {
+    if (partialEl) { partialEl.el.remove(); partialEl = null; }
+    return;
+  }
+  $('hint').hidden = true;
+  if (!partialEl) { partialEl = makeEl(true); partialEl.tEl.textContent = '…'; $('feed').append(partialEl.el); }
+  partialEl.sEl.textContent = text;
+  const seq = ++partialSeq;
+  clearTimeout(setPartial.timer);
+  setPartial.timer = setTimeout(() => { if (seq === partialSeq) enqueue({line: null, text}); }, 600);
+  scrollEnd();
+}
+
+// ---- translation (Google's public endpoint first, MyMemory as backup)
+const cache = new Map();
+async function getJSON(url){
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(url, {signal: ctl.signal});
+    if (!r.ok) throw new Error('http ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+async function viaGoogle(text, from, to){
+  const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=' + from + '&tl=' + to + '&q=' + encodeURIComponent(text);
+  const j = await getJSON(u);
+  return j[0].map(p => p[0]).join('');
+}
+async function viaMyMemory(text, from, to){
+  const u = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + from + '|' + to;
+  const j = await getJSON(u);
+  return j.responseData && j.responseData.translatedText;
+}
+async function translate(text, from, to){
+  const key = from + '|' + to + '|' + text;
+  if (cache.has(key)) return cache.get(key);
+  let out = null;
+  try { out = await viaGoogle(text, from, to); } catch(e) {}
+  if (!out) { try { out = await viaMyMemory(text, from, to); } catch(e) {} }
+  if (out) cache.set(key, out);
+  return out;
+}
+
+const queue = [];
+let working = false;
+function enqueue(job){
+  job.from = src().t; job.to = tgt().t;
+  if (!job.line) {                       // only the newest live sentence matters
+    for (let i = queue.length - 1; i >= 0; i--) if (!queue[i].line) queue.splice(i, 1);
+  }
+  queue.push(job);
+  pump();
+}
+async function pump(){
+  if (working) return;
+  working = true;
+  while (queue.length) {
+    const job = queue.shift();
+    const out = await translate(job.text, job.from, job.to);
+    if (job.line) {
+      if (out) { job.line.tr = out; job.line.tEl.textContent = out; }
+      else if (++job.line.fails < 4) setTimeout(() => enqueue({line: job.line, text: job.text}), 3000);
+      else { job.line.tEl.textContent = '(translation unavailable)'; }
+    } else if (out && job.text === partialText && partialEl) {
+      partialEl.tEl.textContent = out;
+    }
+    if (!out) msg('Translation service not answering. Retrying; check your internet connection.');
+    else if ($('msg').textContent.startsWith('Translation')) msg('');
+    scrollEnd();
+  }
+  working = false;
+}
+
+// ---- speech recognition
+const TERM = /[^.!?。！？]*[.!?。！？]+(?=\s|$)/g;
+
+// Take finished sentences (and over-long stretches) out of the text heard so far.
+function split(rest, final){
+  const done = [];
+  let m, used = 0;
+  TERM.lastIndex = 0;
+  const found = [];
+  while ((m = TERM.exec(rest)) !== null) { found.push(m[0]); used = TERM.lastIndex; }
+  let tail = rest.slice(used);
+  if (!final && !tail.trim() && found.length) { used -= found.pop().length; tail = rest.slice(used); }
+  done.push(...found);
+  while (!final && tail.length > 170) {          // no punctuation: cut at a word boundary
+    let cut = tail.lastIndexOf(' ', 120);
+    if (cut < 40) cut = tail.indexOf(' ', 120);
+    if (cut < 0) break;
+    done.push(tail.slice(0, cut));
+    tail = tail.slice(cut);
+    used += cut;
+  }
+  return {done, tail, used: rest.length - tail.length};
+}
+
+function startRec(){
+  if (!running) return;
+  rec = new SR();
+  rec.lang = src().s;
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+  const s = sess = {consumed: {}, finished: {}, interim: {}};
+
+  rec.onresult = e => {
+    let tail = '';
+    for (let i = 0; i < e.results.length; i++) {
+      if (s.finished[i]) continue;
+      const r = e.results[i];
+      const text = r[0].transcript;
+      const rest = text.slice(s.consumed[i] || 0);
+      const res = split(rest, r.isFinal);
+      res.done.forEach(x => { if (x.trim()) addLine(x.trim()); });
+      s.consumed[i] = (s.consumed[i] || 0) + res.used;
+      if (r.isFinal) {
+        if (res.tail.trim()) addLine(res.tail.trim());
+        s.finished[i] = true;
+      } else {
+        s.interim[i] = res.tail;
+        tail = res.tail.trim();
+      }
+    }
+    setPartial(tail);
+  };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      msg('Microphone or speech recognition is blocked. Allow the microphone for this site, and turn on Siri & Dictation in iPhone Settings.');
+      stopAll();
+    } else if (e.error === 'network') {
+      msg('Speech recognition needs an internet connection.');
+    }
+  };
+  rec.onend = () => {
+    // keep whatever was heard but not yet finalized
+    Object.keys(s.interim).forEach(i => {
+      if (!s.finished[i] && s.interim[i] && s.interim[i].trim()) addLine(s.interim[i].trim());
+      s.finished[i] = true;
+    });
+    setPartial('');
+    if (running) { clearTimeout(restartTimer); restartTimer = setTimeout(startRec, 250); }
+  };
+  try { rec.start(); } catch(e) {}
+}
+
+async function keepAwake(){
+  try { if ('wakeLock' in navigator && running) wake = await navigator.wakeLock.request('screen'); } catch(e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) keepAwake(); });
+
+function startAll(){
+  if (!SR) { msg('This browser has no speech recognition. Open the page in Safari on iPhone.'); return; }
+  msg('');
+  running = true;
+  $('go').textContent = 'Stop'; $('go').classList.add('on');
+  status('Listening…');
+  for (const id of ['src','tgt','swap']) $(id).disabled = true;
+  keepAwake();
+  startRec();             // called straight from the tap so iOS allows the microphone
+}
+function stopAll(){
+  running = false;
+  clearTimeout(restartTimer);
+  try { rec && rec.stop(); } catch(e) {}
+  try { wake && wake.release(); } catch(e) {}
+  wake = null;
+  $('go').textContent = 'Start'; $('go').classList.remove('on');
+  status('Stopped');
+  for (const id of ['src','tgt','swap']) $(id).disabled = false;
+}
+
+// ---- controls
+$('go').onclick = () => running ? stopAll() : startAll();
+$('swap').onclick = () => { const a = $('src').value; $('src').value = $('tgt').value; $('tgt').value = a; saveLangs(); };
+function saveLangs(){ store.set('src', $('src').value); store.set('tgt', $('tgt').value); }
+$('src').onchange = $('tgt').onchange = () => {
+  saveLangs();
+  if ($('src').value === $('tgt').value) msg('Pick two different languages to get a translation.'); else msg('');
+};
+$('bigger').onclick = () => { size = Math.min(48, size + 2); store.set('size', size); applyLook(); restyle(); };
+$('smaller').onclick = () => { size = Math.max(16, size - 2); store.set('size', size); applyLook(); restyle(); };
+function restyle(){
+  const all = lines.map(l => l).concat(partialEl ? [partialEl] : []);
+  all.forEach(l => { l.tEl.style.fontSize = size + 'px'; l.sEl.style.fontSize = Math.max(14, size * 0.62) + 'px'; });
+}
+$('tsrc').onclick = () => { showSrc = !showSrc; store.set('showSrc', showSrc ? '1' : '0'); applyLook(); };
+$('clear').onclick = () => {
+  lines.splice(0).forEach(l => l.el.remove());
+  queue.length = 0;
+  $('hint').hidden = lines.length > 0;
+};
+$('copy').onclick = async () => {
+  const text = lines.map(l => l.source + '\n' + l.tr).join('\n\n');
+  try { await navigator.clipboard.writeText(text); status('Transcript copied'); }
+  catch(e) { msg('Could not copy. Long-press the text to select it.'); }
+};
+
+if (!SR) msg('This browser has no speech recognition. Open the page in Safari on iPhone.');
+</script>
+</body>
+</html>
